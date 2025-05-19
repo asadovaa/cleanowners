@@ -67,42 +67,62 @@ class TestGetUsernamesFromCodeowners(unittest.TestCase):
     """Test the get_usernames_from_codeowners function in cleanowners.py"""
 
     def test_get_usernames_from_codeowners_ignore_teams(self):
-        """Test the get_usernames_from_codeowners function."""
+        """Test usernames are correctly parsed ignoring teams"""
         codeowners_file_contents = MagicMock()
-        codeowners_file_contents.decoded = """
+        codeowners_file_contents.decoded = b"""
         # Comment
-        @user1
-        @user2
-        @org/team
-        # Another comment
-        @user3 @user4
-        """.encode(
-            "ASCII"
-        )
+        *.js    @user1
+        *.ts    @user2
+        /src/   @org/team
+        *.py    @user3 @user4
+        """
+
         expected_usernames = ["user1", "user2", "user3", "user4"]
-
         result = get_usernames_from_codeowners(codeowners_file_contents)
-
         self.assertEqual(result, expected_usernames)
 
     def test_get_usernames_from_codeowners_with_teams(self):
-        """Test the get_usernames_from_codeowners function."""
+        """Test usernames are correctly parsed including teams"""
         codeowners_file_contents = MagicMock()
-        codeowners_file_contents.decoded = """
+        codeowners_file_contents.decoded = b"""
         # Comment
-        @user1
-        @user2
-        @org/team
-        # Another comment
-        @user3 @user4
-        """.encode(
-            "ASCII"
-        )
+        *.js    @user1
+        *.ts    @user2
+        /src/   @org/team
+        *.py    @user3 @user4
+        """
+
         expected_usernames = ["user1", "user2", "org/team", "user3", "user4"]
-
-        result = get_usernames_from_codeowners(codeowners_file_contents, False)
-
+        result = get_usernames_from_codeowners(codeowners_file_contents, ignore_teams=False)
         self.assertEqual(result, expected_usernames)
+
+    def test_get_usernames_from_codeowners_decode_fallback(self):
+        """Test fallback when .decoded attribute is missing"""
+        codeowners_file_contents = MagicMock()
+        # Simulate .decode() call on the object directly
+        codeowners_file_contents.decode.return_value = """
+        *.js    @fallbackuser
+        """.strip()
+
+        result = get_usernames_from_codeowners(codeowners_file_contents)
+        self.assertEqual(result, ["fallbackuser"])
+
+    def test_get_usernames_from_codeowners_invalid_encoding(self):
+        """Test when decoding fails and issue is opened"""
+        codeowners_file_contents = MagicMock()
+        codeowners_file_contents.decode.side_effect = UnicodeDecodeError("utf-8", b"", 0, 1, "reason")
+        repo = MagicMock()
+        repo.full_name = "org/repo"
+
+        issue_opened = {}
+
+        def fake_issue_opener(repo_obj, title, body):
+            issue_opened["title"] = title
+            issue_opened["body"] = body
+
+        result = get_usernames_from_codeowners(codeowners_file_contents, repo=repo, open_issue_func=fake_issue_opener)
+        self.assertEqual(result, [])
+        self.assertIn("⚠️ Unable to parse CODEOWNERS file", issue_opened["title"])
 
 
 class TestGetOrganization(unittest.TestCase):

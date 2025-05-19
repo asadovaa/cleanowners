@@ -100,7 +100,11 @@ def main():  # pragma: no cover
             ).decode_content()
 
         # Extract the usernames from the CODEOWNERS file
-        usernames = get_usernames_from_codeowners(codeowners_file_contents)
+        usernames = get_usernames_from_codeowners(
+            codeowners_file_contents,
+            repo=repo,
+            open_issue_func=repo.create_issue,
+        )
 
         usernames_to_remove = []
         codeowners_file_contents_new = None
@@ -247,29 +251,43 @@ def get_repos_iterator(organization, repository_list, github_connection):
     return repos
 
 
-def get_usernames_from_codeowners(codeowners_file_contents, ignore_teams=True):
-    """Extract the usernames from the CODEOWNERS file"""
+def get_usernames_from_codeowners(codeowners_file_contents, repo=None, open_issue_func=None, ignore_teams=True):
+    """Extract usernames from CODEOWNERS file with decoding fallback"""
     usernames = []
-    for line in codeowners_file_contents.decoded.splitlines():
-        if line:
-            line = line.decode()
-            # skip comments
-            if line.lstrip().startswith("#"):
-                continue
-            # skip empty lines
-            if not line.strip():
-                continue
-            # Identify handles
-            if "@" in line:
-                handles = line.split("@")[1:]
-                for handle in handles:
-                    handle = handle.split()[0]
-                    # Identify team handles by the presence of a slash.
-                    # Ignore teams because non-org members cannot be in a team.
-                    if ignore_teams and "/" not in handle:
-                        usernames.append(handle)
-                    elif not ignore_teams:
-                        usernames.append(handle)
+
+    try:
+        if hasattr(codeowners_file_contents, "decoded"):
+            lines = codeowners_file_contents.decoded.splitlines()
+        else:
+            lines = codeowners_file_contents.decode().splitlines()
+    except Exception as e:
+        print(f"[ERROR] Failed to decode CODEOWNERS file in {repo.full_name if repo else 'unknown repo'}: {e}")
+        if repo and open_issue_func:
+            open_issue_func(
+                repo,
+                title="⚠️ Unable to parse CODEOWNERS file",
+                body=(
+                    "The `CODEOWNERS` file in this repository could not be parsed due to encoding or binary content issues.\n\n"
+                    "Please ensure it is saved as a plain UTF-8 encoded text file, and re-commit it.\n\n"
+                    "This is needed for tools like the cleanowners GitHub App to verify ownership and suggest valid maintainers."
+                )
+            )
+        return usernames  # return empty list instead of crashing
+
+    for line in lines:
+        if isinstance(line, bytes):
+            line = line.decode(errors="ignore")  # decode any remaining bytes silently
+        if line.lstrip().startswith("#") or not line.strip():
+            continue
+        if "@" in line:
+            handles = line.split("@")[1:]
+            for handle in handles:
+                handle = handle.split()[0]
+                if ignore_teams and "/" not in handle:
+                    usernames.append(handle)
+                elif not ignore_teams:
+                    usernames.append(handle)
+
     return usernames
 
 
