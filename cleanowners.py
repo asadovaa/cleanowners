@@ -258,6 +258,8 @@ def get_usernames_from_codeowners(codeowners_file_contents, repo=None, open_issu
     try:
         if hasattr(codeowners_file_contents, "decoded"):
             lines = codeowners_file_contents.decoded.splitlines()
+        elif isinstance(codeowners_file_contents, bytes):
+            lines = codeowners_file_contents.splitlines()
         else:
             lines = codeowners_file_contents.decode().splitlines()
     except Exception as e:
@@ -272,11 +274,11 @@ def get_usernames_from_codeowners(codeowners_file_contents, repo=None, open_issu
                     "This is needed for tools like the cleanowners GitHub App to verify ownership and suggest valid maintainers."
                 )
             )
-        return usernames  # return empty list instead of crashing
+        return usernames
 
     for line in lines:
         if isinstance(line, bytes):
-            line = line.decode(errors="ignore")  # decode any remaining bytes silently
+            line = line.decode(errors="ignore")
         if line.lstrip().startswith("#") or not line.strip():
             continue
         if "@" in line:
