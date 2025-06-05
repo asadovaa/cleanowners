@@ -1,11 +1,13 @@
 """A GitHub Action to suggest removal of non-organization members from CODEOWNERS files."""
 
 import uuid
+import time
 
 import auth
 import env
 import github3
 from markdown_writer import write_to_markdown
+from requests.exceptions import ConnectionError as RequestsConnectionError
 
 
 def get_org(github_connection, organization):
@@ -70,36 +72,30 @@ def main():  # pragma: no cover
 
     repo_and_users_to_remove = {}
     repos_missing_codeowners = []
+
     for repo in repos:
-        # Check if the repository is in the exempt_repositories_list
-        if repo.full_name in exempt_repositories_list:
-            print(f"Skipping {repo.full_name} as it is in the exempt_repositories_list")
+        # Skip if archived or exempt
+        if repo.archived or repo.full_name in exempt_repositories_list:
+            reason = "archived" if repo.archived else "in the exempt list"
+            print(f"Skipping {repo.full_name} as it is {reason}")
             continue
 
-        # Check to see if repository is archived
-        if repo.archived:
-            print(f"Skipping {repo.full_name} as it is archived")
-            continue
-
-        # Check to see if repository has a CODEOWNERS file
-        file_changed = False
+        # Try to get a CODEOWNERS file
         codeowners_file_contents, codeowners_filepath = get_codeowners_file(repo)
-
         if not codeowners_file_contents:
             print(f"Skipping {repo.full_name} as it does not have a CODEOWNERS file")
             no_codeowners_count += 1
             repos_missing_codeowners.append(repo)
             continue
 
+        # Now you're guaranteed: unarchived + has CODEOWNERS
         codeowners_count += 1
 
         if codeowners_file_contents.content is None:
-            # This is a large file so we need to get the sha and download based off the sha
             codeowners_file_contents = repo.blob(
                 repo.file_contents(codeowners_filepath).sha
             ).decode_content()
 
-        # Extract the usernames from the CODEOWNERS file
         usernames = get_usernames_from_codeowners(
             codeowners_file_contents,
             repo=repo,
@@ -108,6 +104,7 @@ def main():  # pragma: no cover
 
         usernames_to_remove = []
         codeowners_file_contents_new = None
+
         for username in usernames:
             org = organization if organization else repo.owner.login
             gh_org = get_org(github_connection, org)
@@ -115,7 +112,6 @@ def main():  # pragma: no cover
                 print(f"Owner {org} of repo {repo} is not an organization.")
                 break
 
-            # Check to see if the username is a member of the organization
             if not gh_org.is_member(username):
                 print(
                     f"\t{username} is not a member of {org}. Suggest removing them from {repo.full_name}"
@@ -123,19 +119,16 @@ def main():  # pragma: no cover
                 users_count += 1
                 usernames_to_remove.append(username)
                 if not dry_run:
-                    # Remove that username from the codeowners_file_contents
                     file_changed = True
                     bytes_username = f"@{username}".encode("ASCII")
                     codeowners_file_contents_new = (
                         codeowners_file_contents.decoded.replace(bytes_username, b"")
                     )
 
-        # Store the repo and users to remove for reporting later
         if usernames_to_remove:
             repo_and_users_to_remove[repo] = usernames_to_remove
 
-        # Update the CODEOWNERS file if usernames were removed
-        if file_changed:
+        if usernames_to_remove and not dry_run:
             eligble_for_pr_count += 1
             new_usernames = get_usernames_from_codeowners(codeowners_file_contents_new)
             if len(new_usernames) == 0:
@@ -157,7 +150,8 @@ def main():  # pragma: no cover
                 print("\tFailed to create pull request. Check write permissions.")
                 continue
 
-    # Report the statistics from this run
+        time.sleep(0.2)  # Slight delay to reduce API pressure
+
     print_stats(
         pull_count=pull_count,
         eligble_for_pr_count=eligble_for_pr_count,
@@ -182,36 +176,14 @@ def get_codeowners_file(repo):
     Get the CODEOWNERS file from the repository and return
     the file contents and file path or None if it doesn't exist
     """
-    codeowners_file_contents = None
-    codeowners_filepath = None
-    try:
-        if (
-            repo.file_contents(".github/CODEOWNERS")
-            and repo.file_contents(".github/CODEOWNERS").size > 0
-        ):
-            codeowners_file_contents = repo.file_contents(".github/CODEOWNERS")
-            codeowners_filepath = ".github/CODEOWNERS"
-    except github3.exceptions.NotFoundError:
-        pass
-    try:
-        if (
-            repo.file_contents("CODEOWNERS")
-            and repo.file_contents("CODEOWNERS").size > 0
-        ):
-            codeowners_file_contents = repo.file_contents("CODEOWNERS")
-            codeowners_filepath = "CODEOWNERS"
-    except github3.exceptions.NotFoundError:
-        pass
-    try:
-        if (
-            repo.file_contents("docs/CODEOWNERS")
-            and repo.file_contents("docs/CODEOWNERS").size > 0
-        ):
-            codeowners_file_contents = repo.file_contents("docs/CODEOWNERS")
-            codeowners_filepath = "docs/CODEOWNERS"
-    except github3.exceptions.NotFoundError:
-        pass
-    return codeowners_file_contents, codeowners_filepath
+    for path in [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]:
+        try:
+            file = repo.file_contents(path)
+            if file and file.size > 0:
+                return file, path
+        except (github3.exceptions.NotFoundError, github3.exceptions.ConnectionError, RequestsConnectionError):
+            continue
+    return None, None
 
 
 def print_stats(
@@ -242,12 +214,10 @@ def get_repos_iterator(organization, repository_list, github_connection):
     if organization and not repository_list:
         repos = github_connection.organization(organization).repositories()
     else:
-        # Get the repositories from the repository_list
         for full_repo_path in repository_list:
             org = full_repo_path.split("/")[0]
             repo = full_repo_path.split("/")[1]
             repos.append(github_connection.repository(org, repo))
-
     return repos
 
 
@@ -303,11 +273,9 @@ def commit_changes(
 ):
     """Commit the changes to the repo and open a pull request and return the pull request object"""
     default_branch = repo.default_branch
-    # Get latest commit sha from default branch
     default_branch_commit = repo.ref(f"heads/{default_branch}").object.sha
-    front_matter = "refs/heads/"
     branch_name = f"codeowners-{str(uuid.uuid4())}"
-    repo.create_ref(front_matter + branch_name, default_branch_commit)
+    repo.create_ref(f"refs/heads/{branch_name}", default_branch_commit)
     repo.file_contents(codeowners_filepath).update(
         message=commit_message,
         content=codeowners_file_contents_new,
